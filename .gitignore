@@ -1,0 +1,14 @@
+node_modules/
+.DS_Store
+*.log
+dist/
+build/
+.env
+.env.local
+.vscode/
+.idea/
+bin/
+*.exe
+*.so
+*.dll
+LLM-Gateway/.git/
