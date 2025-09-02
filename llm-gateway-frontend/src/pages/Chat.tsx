@@ -16,24 +16,35 @@ const Chat: React.FC = () => {
   const { providers } = useStore()
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [inputText, setInputText] = useState('')
-  const [selectedModel, setSelectedModel] = useState('')
+  const [selectedModel, setSelectedModel] = useState('gpt-4')
   const [isLoading, setIsLoading] = useState(false)
   const [temperature, setTemperature] = useState(0.7)
   const [maxTokens, setMaxTokens] = useState(1000)
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
+  // 演示用的模型选项（对应智能路由系统支持的模型）
+  const availableModels = [
+    { value: 'gpt-4', label: 'GPT-4 (OpenAI)', provider: 'openai' },
+    { value: 'gpt-3.5-turbo', label: 'GPT-3.5 Turbo (OpenAI)', provider: 'openai' },
+    { value: 'claude-3', label: 'Claude-3 (Anthropic)', provider: 'anthropic' },
+    { value: 'claude-3-sonnet', label: 'Claude-3 Sonnet (Anthropic)', provider: 'anthropic' },
+    { value: 'ernie-bot', label: '文心一言 (Baidu)', provider: 'baidu' },
+    { value: 'ernie-bot-4', label: '文心一言 4.0 (Baidu)', provider: 'baidu' },
+  ]
+
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
 
-  useEffect(() => {
-    if (providers.length > 0 && !selectedModel) {
-      const firstOnlineProvider = providers.find(p => p.status === 'online')
-      if (firstOnlineProvider) {
-        setSelectedModel(firstOnlineProvider.model)
-      }
-    }
-  }, [providers, selectedModel])
+  // 注释掉原来的provider依赖逻辑，使用静态模型列表
+  // useEffect(() => {
+  //   if (providers.length > 0 && !selectedModel) {
+  //     const firstOnlineProvider = providers.find(p => p.status === 'online')
+  //     if (firstOnlineProvider) {
+  //       setSelectedModel(firstOnlineProvider.model)
+  //     }
+  //   }
+  // }, [providers, selectedModel])
 
   const handleSendMessage = async () => {
     if (!inputText.trim() || !selectedModel) {
@@ -56,7 +67,8 @@ const Chat: React.FC = () => {
         model: selectedModel,
         messages: [...messages, userMessage].map(msg => ({
           role: msg.role,
-          content: msg.content
+          content: msg.content,
+          timestamp: msg.timestamp
         })),
         maxTokens,
         temperature
@@ -219,16 +231,23 @@ const Chat: React.FC = () => {
                   style={{ width: '100%', marginTop: 8 }}
                   placeholder="选择模型"
                 >
-                  {providers
-                    .filter(p => p.status === 'online')
-                    .map(provider => (
-                      <Option key={provider.id} value={provider.model}>
-                        <Space>
-                          {provider.model}
-                          <Tag color="green" size="small">{provider.type}</Tag>
-                        </Space>
-                      </Option>
-                    ))}
+                  {availableModels.map(model => (
+                    <Option key={model.value} value={model.value}>
+                      <Space>
+                        {model.label}
+                        <Tag 
+                          color={
+                            model.provider === 'openai' ? 'blue' :
+                            model.provider === 'anthropic' ? 'green' :
+                            model.provider === 'baidu' ? 'orange' : 'default'
+                          } 
+
+                        >
+                          {model.provider}
+                        </Tag>
+                      </Space>
+                    </Option>
+                  ))}
                 </Select>
               </div>
 

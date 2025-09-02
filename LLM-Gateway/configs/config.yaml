@@ -37,18 +37,43 @@ metrics:
   path: "/metrics"
   port: 9090
 
-# Provider configurations will be added here
+# Smart Router Configuration (Week4)
+smart_router:
+  strategy: "round_robin"  # round_robin, weighted_round_robin, least_connections, health_based
+  health_check_interval: "30s"
+  failover_enabled: true
+  max_retries: 3
+  circuit_breaker:
+    enabled: true
+    threshold: 5
+    timeout: "30s"
+    max_requests: 3
+  metrics_enabled: true
+  # Provider weights for weighted_round_robin strategy
+  weights:
+    openai: 10
+    anthropic: 8
+    baidu: 5
+
+# Provider configurations
 providers:
   openai:
     enabled: true
-    api_key: "${OPENAI_API_KEY}"
+    api_key: "${OPENAI_API_KEY:-sk-test-key}"
     base_url: "https://api.openai.com/v1"
     timeout: "30s"
     retry_count: 3
     
   anthropic:
-    enabled: false
-    api_key: "${ANTHROPIC_API_KEY}"
+    enabled: true
+    api_key: "${ANTHROPIC_API_KEY:-claude-test-key}"
     base_url: "https://api.anthropic.com"
+    timeout: "30s"
+    retry_count: 3
+    
+  baidu:
+    enabled: true
+    api_key: "${BAIDU_API_KEY:-baidu-test-key}"
+    base_url: "https://aip.baidubce.com/rpc/2.0/ai_custom/v1/wenxinworkshop"
     timeout: "30s"
     retry_count: 3

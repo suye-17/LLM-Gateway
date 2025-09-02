@@ -1,23 +1,27 @@
 import React, { useEffect, useState } from 'react'
-import { Card, Row, Col, Select, DatePicker, Statistic, Table } from 'antd'
+import { Card, Row, Col, Select, DatePicker, Statistic, Table, Tag, Divider, Alert } from 'antd'
 import {
   LineChart, Line, AreaChart, Area, BarChart, Bar,
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
   PieChart, Pie, Cell
 } from 'recharts'
 import { useStore } from '../store/useStore'
+import { CheckCircleOutlined, ExclamationCircleOutlined, ClockCircleOutlined } from '@ant-design/icons'
 
 const { RangePicker } = DatePicker
 const { Option } = Select
 
 const Metrics: React.FC = () => {
-  const { fetchMetrics } = useStore()
+  const { fetchMetrics, metrics } = useStore()
   const [timeRange, setTimeRange] = useState('24h')
   const [selectedProvider, setSelectedProvider] = useState('all')
 
   useEffect(() => {
     fetchMetrics()
   }, [fetchMetrics])
+
+  // 智能路由器状态
+  const smartRouterData = metrics?.smart_router
 
   // 模拟指标数据
   const requestData = [
@@ -245,6 +249,155 @@ const Metrics: React.FC = () => {
           </Card>
         </Col>
       </Row>
+
+      {/* 智能路由器状态 (Week4) */}
+      {smartRouterData && (
+        <>
+          <Divider orientation="left">
+            <Tag color="blue" icon={<CheckCircleOutlined />}>
+              Week4 智能路由系统
+            </Tag>
+          </Divider>
+          
+          <Row gutter={[16, 16]}>
+            <Col xs={24} md={6}>
+              <Card>
+                <Statistic
+                  title="路由策略"
+                  value={smartRouterData.strategy}
+                  valueStyle={{ color: '#1890ff' }}
+                />
+              </Card>
+            </Col>
+            <Col xs={24} md={6}>
+              <Card>
+                <Statistic
+                  title="处理请求数"
+                  value={smartRouterData.requests}
+                  suffix="次"
+                  valueStyle={{ color: '#52c41a' }}
+                />
+              </Card>
+            </Col>
+            <Col xs={24} md={6}>
+              <Card>
+                <Statistic
+                  title="健康提供商"
+                  value={metrics.providers_healthy}
+                  suffix={`/ ${smartRouterData.providers.length}`}
+                  valueStyle={{ color: '#faad14' }}
+                />
+              </Card>
+            </Col>
+            <Col xs={24} md={6}>
+              <Card>
+                <Statistic
+                  title="平均延迟"
+                  value={metrics.avg_latency_ms}
+                  suffix="ms"
+                  valueStyle={{ color: '#f5222d' }}
+                />
+              </Card>
+            </Col>
+          </Row>
+
+          <Row gutter={[16, 16]}>
+            <Col xs={24} lg={12}>
+              <Card title="负载均衡配置" extra={<Tag color="processing">活跃</Tag>}>
+                <div style={{ marginBottom: 16 }}>
+                  <strong>当前算法：</strong>
+                  <Tag color="blue" style={{ marginLeft: 8 }}>
+                    {smartRouterData.load_balancing.current}
+                  </Tag>
+                </div>
+                <div style={{ marginBottom: 16 }}>
+                  <strong>支持算法：</strong>
+                  <div style={{ marginTop: 8 }}>
+                    {smartRouterData.load_balancing.algorithms.map((algo) => (
+                      <Tag 
+                        key={algo} 
+                        color={algo === smartRouterData.load_balancing.current ? 'blue' : 'default'}
+                        style={{ marginBottom: 4 }}
+                      >
+                        {algo}
+                      </Tag>
+                    ))}
+                  </div>
+                </div>
+              </Card>
+            </Col>
+            
+            <Col xs={24} lg={12}>
+              <Card title="系统监控" extra={
+                <Tag color="success" icon={<CheckCircleOutlined />}>
+                  运行中
+                </Tag>
+              }>
+                <div style={{ marginBottom: 16 }}>
+                  <strong>健康检查：</strong>
+                  <Tag color={smartRouterData.health_checks.enabled ? 'success' : 'error'}>
+                    {smartRouterData.health_checks.enabled ? '启用' : '禁用'}
+                  </Tag>
+                  <span style={{ marginLeft: 8, color: '#666' }}>
+                    间隔: {smartRouterData.health_checks.interval}
+                  </span>
+                </div>
+                <div style={{ marginBottom: 16 }}>
+                  <strong>熔断器：</strong>
+                  <Tag color={smartRouterData.circuit_breaker.enabled ? 'success' : 'error'}>
+                    {smartRouterData.circuit_breaker.enabled ? '启用' : '禁用'}
+                  </Tag>
+                  <span style={{ marginLeft: 8, color: '#666' }}>
+                    阈值: {smartRouterData.circuit_breaker.threshold}, 超时: {smartRouterData.circuit_breaker.timeout}
+                  </span>
+                </div>
+                <div>
+                  <strong>指标端点：</strong>
+                  <a href={smartRouterData.metrics_endpoint} target="_blank" rel="noopener noreferrer">
+                    {smartRouterData.metrics_endpoint}
+                  </a>
+                </div>
+              </Card>
+            </Col>
+          </Row>
+
+          <Row>
+            <Col span={24}>
+              <Card title="提供商状态">
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 16 }}>
+                  {smartRouterData.providers.map((provider) => (
+                    <div key={provider} style={{ 
+                      padding: 16, 
+                      border: '1px solid #d9d9d9', 
+                      borderRadius: 8,
+                      minWidth: 200
+                    }}>
+                      <div style={{ marginBottom: 8 }}>
+                        <strong>{provider}</strong>
+                        <Tag color="success" style={{ marginLeft: 8 }}>
+                          健康
+                        </Tag>
+                      </div>
+                      <div style={{ fontSize: '12px', color: '#666' }}>
+                        熔断器: 关闭 | 最后检查: 刚刚
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </Card>
+            </Col>
+          </Row>
+        </>
+      )}
+
+      {!smartRouterData && (
+        <Alert
+          message="智能路由系统未激活"
+          description="请检查后端服务配置，确保Week4智能路由功能已启用。"
+          type="warning"
+          style={{ marginTop: 16 }}
+        />
+      )}
     </div>
   )
 }

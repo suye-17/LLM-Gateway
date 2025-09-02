@@ -340,7 +340,7 @@ func (h *AdminHandlers) GetSystemStats(c *gin.Context) {
 	})
 }
 
-// (This method is now implemented in gateway_v2.go as part of EnhancedGateway)
+// (This method is now implemented in gateway.go as part of Gateway)
 
 // GetUserStats handles getting user-specific statistics
 func (h *AdminHandlers) GetUserStats(c *gin.Context) {

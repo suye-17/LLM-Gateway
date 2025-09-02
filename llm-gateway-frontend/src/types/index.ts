@@ -30,6 +30,7 @@ export interface Provider {
 }
 
 export interface GatewayMetrics {
+  // 基础指标
   totalRequests: number
   totalTokens: number
   avgResponseTime: number
@@ -39,6 +40,32 @@ export interface GatewayMetrics {
   tokensPerSecond: number
   errorRate: number
   uptime: string
+  
+  // 智能路由指标 (Week4)
+  requests_total?: number
+  requests_success?: number
+  requests_failed?: number
+  avg_latency_ms?: number
+  providers_healthy?: number
+  smart_router?: {
+    strategy: string
+    requests: number
+    providers: string[]
+    health_checks: {
+      enabled: boolean
+      interval: string
+    }
+    circuit_breaker: {
+      enabled: boolean
+      threshold: number
+      timeout: string
+    }
+    load_balancing: {
+      algorithms: string[]
+      current: string
+    }
+    metrics_endpoint: string
+  }
 }
 
 export interface ChatMessage {
@@ -57,15 +84,38 @@ export interface ChatCompletion {
 }
 
 export interface RoutingConfig {
-  strategy: 'round-robin' | 'weighted' | 'least-latency' | 'cost-optimized' | 'random'
+  strategy: 'round_robin' | 'weighted_round_robin' | 'least_connections' | 'least_latency' | 'health_based' | 'cost_optimized' | 'random'
   providers: string[]
   weights?: Record<string, number>
-  fallbackEnabled: boolean
+  failoverEnabled: boolean
   circuitBreakerEnabled: boolean
   retryPolicy: {
     maxRetries: number
     retryDelay: number
   }
+  healthCheckInterval?: string
+  metricsEnabled?: boolean
+}
+
+// 智能路由器状态接口
+export interface SmartRouterStatus {
+  strategy: string
+  requests: number
+  providers: string[]
+  health_checks: {
+    enabled: boolean
+    interval: string
+  }
+  circuit_breaker: {
+    enabled: boolean
+    threshold: number
+    timeout: string
+  }
+  load_balancing: {
+    algorithms: string[]
+    current: string
+  }
+  metrics_endpoint: string
 }
 
 export interface SystemConfig {

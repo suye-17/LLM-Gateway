@@ -1,6 +1,36 @@
 version: '3.8'
 
 services:
+  # LLM Gateway Application with Smart Router
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    container_name: llm-gateway-test
+    ports:
+      - "8080:8080"
+      - "9090:9090"  # Metrics port
+    environment:
+      - CONFIG_FILE=configs/config.yaml
+      - DB_HOST=postgres
+      - REDIS_HOST=redis
+      - OPENAI_API_KEY=sk-test-key-for-testing
+      - ANTHROPIC_API_KEY=claude-test-key-for-testing
+      - BAIDU_API_KEY=baidu-test-key-for-testing
+    volumes:
+      - ./configs:/app/configs:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
   postgres:
     image: postgres:15-alpine
     container_name: llm-gateway-postgres-test

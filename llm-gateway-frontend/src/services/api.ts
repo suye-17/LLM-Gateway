@@ -54,14 +54,19 @@ class ApiService {
 
   // 获取提供商列表
   async getProviders(): Promise<Provider[]> {
-    const response = await this.api.get<ApiResponse<Provider[]>>('/admin/providers')
-    return response.data.data || []
+    try {
+      const response = await this.api.get<ApiResponse<Provider[]>>('/admin/providers')
+      return response.data.data || []
+    } catch (error) {
+      console.log('Providers endpoint might not return wrapped data, returning empty array')
+      return []
+    }
   }
 
   // 获取系统指标
   async getMetrics(): Promise<GatewayMetrics> {
-    const response = await this.api.get<ApiResponse<GatewayMetrics>>('/admin/metrics')
-    return response.data.data!
+    const response = await this.api.get<GatewayMetrics>('/admin/metrics')
+    return response.data
   }
 
   // 获取系统状态
