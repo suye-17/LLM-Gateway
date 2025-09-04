@@ -27,13 +27,14 @@ type Message struct {
 
 // Response represents a standardized LLM response
 type Response struct {
-	ID       string    `json:"id"`
-	Model    string    `json:"model"`
-	Choices  []Choice  `json:"choices"`
-	Usage    Usage     `json:"usage"`
-	Provider string    `json:"provider"`
-	Latency  int64     `json:"latency_ms"`
-	Created  time.Time `json:"created"`
+	ID        string    `json:"id"`
+	Model     string    `json:"model"`
+	Choices   []Choice  `json:"choices"`
+	Usage     Usage     `json:"usage"`
+	Provider  string    `json:"provider"`
+	Latency   int64     `json:"latency_ms"`
+	LatencyMs int64     `json:"latency_ms"` // Alias for backward compatibility
+	Created   time.Time `json:"created"`
 }
 
 // Choice represents a single response choice
@@ -108,12 +109,13 @@ type Context struct {
 
 // Config represents the gateway configuration
 type Config struct {
-	Server   ServerConfig   `mapstructure:"server"`
-	Database DatabaseConfig `mapstructure:"database"`
-	Redis    RedisConfig    `mapstructure:"redis"`
-	Auth     AuthConfig     `mapstructure:"auth"`
-	Logging  LoggingConfig  `mapstructure:"logging"`
-	Metrics  MetricsConfig  `mapstructure:"metrics"`
+	Server      ServerConfig       `mapstructure:"server"`
+	Database    DatabaseConfig     `mapstructure:"database"`
+	Redis       RedisConfig        `mapstructure:"redis"`
+	Auth        AuthConfig         `mapstructure:"auth"`
+	Logging     LoggingConfig      `mapstructure:"logging"`
+	Metrics     MetricsConfig      `mapstructure:"metrics"`
+	SmartRouter *SmartRouterConfig `mapstructure:"smart_router"`
 }
 
 // ServerConfig represents server configuration
@@ -290,4 +292,25 @@ type ProviderRegistry interface {
 
 	// GetProvidersByType returns providers of a specific type
 	GetProvidersByType(providerType string) []Provider
+}
+
+// SmartRouterConfig represents smart router configuration
+type SmartRouterConfig struct {
+	Enabled              bool                    `mapstructure:"enabled" json:"enabled"`
+	Strategy             string                  `mapstructure:"strategy" json:"strategy"`
+	HealthCheckInterval  time.Duration           `mapstructure:"health_check_interval" json:"health_check_interval"`
+	HealthCheckTimeout   time.Duration           `mapstructure:"health_check_timeout" json:"health_check_timeout"`
+	FailoverEnabled      bool                    `mapstructure:"failover_enabled" json:"failover_enabled"`
+	MaxRetries           int                     `mapstructure:"max_retries" json:"max_retries"`
+	Weights              map[string]int          `mapstructure:"weights" json:"weights"`
+	CircuitBreaker       *CircuitBreakerConfig   `mapstructure:"circuit_breaker" json:"circuit_breaker"`
+	MetricsEnabled       bool                    `mapstructure:"metrics_enabled" json:"metrics_enabled"`
+}
+
+// CircuitBreakerConfig represents circuit breaker configuration  
+type CircuitBreakerConfig struct {
+	Enabled     bool          `mapstructure:"enabled" json:"enabled"`
+	Threshold   int           `mapstructure:"threshold" json:"threshold"`
+	Timeout     time.Duration `mapstructure:"timeout" json:"timeout"`
+	MaxRequests int           `mapstructure:"max_requests" json:"max_requests"`
 }

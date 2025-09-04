@@ -11,16 +11,23 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/llm-gateway/gateway/internal/config"
+	"github.com/llm-gateway/gateway/pkg/cost"
+	"github.com/llm-gateway/gateway/pkg/retry"
 	"github.com/llm-gateway/gateway/pkg/types"
 	"github.com/llm-gateway/gateway/pkg/utils"
 )
 
 // ClaudeProvider implements the Provider interface for Anthropic Claude
 type ClaudeProvider struct {
-	config     *types.ProviderConfig
-	logger     *utils.Logger
-	httpClient *http.Client
-	rateLimits *types.RateLimitInfo
+	config         *types.ProductionConfig
+	secureConfig   *types.SecureConfig
+	logger         *utils.Logger
+	httpClient     *http.Client
+	rateLimits     *types.RateLimitInfo
+	retryManager   retry.RetryManagerInterface
+	costCalculator *cost.CostCalculator
+	configManager  config.ConfigurationManager
 }
 
 // Claude API structures
@@ -85,24 +92,27 @@ var claudePricing = map[string]struct {
 	"claude-instant-1.2":       {0.8, 2.4},
 }
 
-// NewClaudeProvider creates a new Claude provider
-func NewClaudeProvider(config *types.ProviderConfig, logger *utils.Logger) *ClaudeProvider {
-	if config.BaseURL == "" {
-		config.BaseURL = "https://api.anthropic.com/v1"
+// NewClaudeProvider creates a new Claude provider (backward compatible)
+func NewClaudeProvider(baseConfig *types.ProviderConfig, logger *utils.Logger) *ClaudeProvider {
+	// Convert to production config for compatibility
+	prodConfig := types.NewProductionConfig(baseConfig)
+
+	if prodConfig.BaseURL == "" {
+		prodConfig.BaseURL = "https://api.anthropic.com/v1"
 	}
 
-	if config.Timeout == 0 {
-		config.Timeout = 60 * time.Second
+	if prodConfig.Timeout == 0 {
+		prodConfig.Timeout = 60 * time.Second
 	}
 
 	return &ClaudeProvider{
-		config: config,
+		config: prodConfig,
 		logger: logger,
 		httpClient: &http.Client{
-			Timeout: config.Timeout,
+			Timeout: prodConfig.Timeout,
 		},
 		rateLimits: &types.RateLimitInfo{
-			RequestsPerMinute: config.RateLimit,
+			RequestsPerMinute: prodConfig.RateLimit,
 			ResetTime:         time.Now().Add(time.Minute),
 		},
 	}
@@ -125,7 +135,7 @@ func (p *ClaudeProvider) Call(ctx context.Context, req *types.ChatCompletionRequ
 
 // GetConfig returns the provider configuration
 func (p *ClaudeProvider) GetConfig() *types.ProviderConfig {
-	return p.config
+	return p.config.ProviderConfig
 }
 
 // ValidateConfig validates the provider configuration

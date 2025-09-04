@@ -7,8 +7,8 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
-	"github.com/spf13/viper"
 	"github.com/llm-gateway/gateway/pkg/types"
+	"github.com/spf13/viper"
 )
 
 // Manager handles configuration loading and management
@@ -28,18 +28,18 @@ func NewManager() *Manager {
 func (m *Manager) Load() error {
 	// Set default values
 	m.setDefaults()
-	
+
 	// Configure viper
 	m.viper.SetConfigName("config")
 	m.viper.SetConfigType("yaml")
 	m.viper.AddConfigPath("./configs")
 	m.viper.AddConfigPath(".")
-	
+
 	// Enable environment variable support
 	m.viper.AutomaticEnv()
 	m.viper.SetEnvPrefix("GATEWAY")
 	m.viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
-	
+
 	// Try to read config file
 	if err := m.viper.ReadInConfig(); err != nil {
 		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
@@ -47,13 +47,13 @@ func (m *Manager) Load() error {
 		}
 		// Config file not found is OK, we'll use defaults and env vars
 	}
-	
+
 	// Unmarshal into config struct
 	config := &types.Config{}
 	if err := m.viper.Unmarshal(config); err != nil {
 		return fmt.Errorf("failed to unmarshal config: %w", err)
 	}
-	
+
 	m.config = config
 	return nil
 }
@@ -63,10 +63,10 @@ func (m *Manager) setDefaults() {
 	// Server defaults
 	m.viper.SetDefault("server.host", "0.0.0.0")
 	m.viper.SetDefault("server.port", 8080)
-	m.viper.SetDefault("server.read_timeout", "30s")
-	m.viper.SetDefault("server.write_timeout", "30s")
-	m.viper.SetDefault("server.idle_timeout", "120s")
-	
+	m.viper.SetDefault("server.read_timeout", "120s")
+	m.viper.SetDefault("server.write_timeout", "120s") // 修复流式输出超时问题
+	m.viper.SetDefault("server.idle_timeout", "180s")
+
 	// Database defaults
 	m.viper.SetDefault("database.host", "localhost")
 	m.viper.SetDefault("database.port", 5432)
@@ -75,23 +75,23 @@ func (m *Manager) setDefaults() {
 	m.viper.SetDefault("database.database", "gateway")
 	m.viper.SetDefault("database.max_open_conns", 100)
 	m.viper.SetDefault("database.max_idle_conns", 10)
-	
+
 	// Redis defaults
 	m.viper.SetDefault("redis.host", "localhost")
 	m.viper.SetDefault("redis.port", 6379)
 	m.viper.SetDefault("redis.password", "")
 	m.viper.SetDefault("redis.database", 0)
-	
+
 	// Auth defaults
 	m.viper.SetDefault("auth.jwt_secret", "your-secret-key")
 	m.viper.SetDefault("auth.jwt_expiration", "24h")
 	m.viper.SetDefault("auth.enable_api_key", true)
-	
+
 	// Logging defaults
 	m.viper.SetDefault("logging.level", "info")
 	m.viper.SetDefault("logging.format", "json")
 	m.viper.SetDefault("logging.output", "stdout")
-	
+
 	// Metrics defaults
 	m.viper.SetDefault("metrics.enabled", true)
 	m.viper.SetDefault("metrics.path", "/metrics")
@@ -125,22 +125,22 @@ func (m *Manager) Validate() error {
 	if m.config == nil {
 		return fmt.Errorf("configuration not loaded")
 	}
-	
+
 	// Validate server config
 	if m.config.Server.Port <= 0 || m.config.Server.Port > 65535 {
 		return fmt.Errorf("invalid server port: %d", m.config.Server.Port)
 	}
-	
+
 	// Validate database config
 	if m.config.Database.Host == "" {
 		return fmt.Errorf("database host is required")
 	}
-	
+
 	// Validate auth config
 	if m.config.Auth.JWTSecret == "" || m.config.Auth.JWTSecret == "your-secret-key" {
 		return fmt.Errorf("jwt secret must be set to a secure value")
 	}
-	
+
 	return nil
 }
 

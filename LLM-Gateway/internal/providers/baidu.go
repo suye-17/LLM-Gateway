@@ -13,18 +13,25 @@ import (
 	"strings"
 	"time"
 
+	"github.com/llm-gateway/gateway/internal/config"
+	"github.com/llm-gateway/gateway/pkg/cost"
+	"github.com/llm-gateway/gateway/pkg/retry"
 	"github.com/llm-gateway/gateway/pkg/types"
 	"github.com/llm-gateway/gateway/pkg/utils"
 )
 
 // BaiduProvider implements the Provider interface for Baidu Wenxin
 type BaiduProvider struct {
-	config      *types.ProviderConfig
-	logger      *utils.Logger
-	httpClient  *http.Client
-	rateLimits  *types.RateLimitInfo
-	accessToken string
-	tokenExpiry time.Time
+	config         *types.ProductionConfig
+	secureConfig   *types.SecureConfig
+	logger         *utils.Logger
+	httpClient     *http.Client
+	rateLimits     *types.RateLimitInfo
+	retryManager   retry.RetryManagerInterface
+	costCalculator *cost.CostCalculator
+	configManager  config.ConfigurationManager
+	accessToken    string
+	tokenExpiry    time.Time
 }
 
 // Baidu API structures
@@ -117,24 +124,27 @@ var baiduModelEndpoints = map[string]string{
 	"ernie-tiny-8k":      "ernie-tiny-8k",
 }
 
-// NewBaiduProvider creates a new Baidu provider
-func NewBaiduProvider(config *types.ProviderConfig, logger *utils.Logger) *BaiduProvider {
-	if config.BaseURL == "" {
-		config.BaseURL = "https://aip.baidubce.com"
+// NewBaiduProvider creates a new Baidu provider (backward compatible)
+func NewBaiduProvider(baseConfig *types.ProviderConfig, logger *utils.Logger) *BaiduProvider {
+	// Convert to production config for compatibility
+	prodConfig := types.NewProductionConfig(baseConfig)
+
+	if prodConfig.BaseURL == "" {
+		prodConfig.BaseURL = "https://aip.baidubce.com"
 	}
 
-	if config.Timeout == 0 {
-		config.Timeout = 60 * time.Second
+	if prodConfig.Timeout == 0 {
+		prodConfig.Timeout = 60 * time.Second
 	}
 
 	return &BaiduProvider{
-		config: config,
+		config: prodConfig,
 		logger: logger,
 		httpClient: &http.Client{
-			Timeout: config.Timeout,
+			Timeout: prodConfig.Timeout,
 		},
 		rateLimits: &types.RateLimitInfo{
-			RequestsPerMinute: config.RateLimit,
+			RequestsPerMinute: prodConfig.RateLimit,
 			ResetTime:         time.Now().Add(time.Minute),
 		},
 	}
@@ -157,7 +167,7 @@ func (p *BaiduProvider) Call(ctx context.Context, req *types.ChatCompletionReque
 
 // GetConfig returns the provider configuration
 func (p *BaiduProvider) GetConfig() *types.ProviderConfig {
-	return p.config
+	return p.config.ProviderConfig
 }
 
 // ValidateConfig validates the provider configuration
@@ -579,4 +589,3 @@ func (p *BaiduProvider) updateRateLimits(headers http.Header) {
 		}
 	}
 }
-

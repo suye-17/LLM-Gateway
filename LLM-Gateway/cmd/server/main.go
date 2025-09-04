@@ -9,11 +9,19 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/joho/godotenv"
 	"github.com/llm-gateway/gateway/internal/config"
 	"github.com/llm-gateway/gateway/internal/gateway"
 )
 
 func main() {
+	// Load .env file if it exists
+	if err := godotenv.Load(".env"); err != nil {
+		log.Println("No .env file found, using system environment variables")
+	} else {
+		log.Println("Successfully loaded .env file")
+	}
+
 	// Initialize configuration
 	if err := config.InitDefault(); err != nil {
 		log.Fatalf("Failed to initialize configuration: %v", err)

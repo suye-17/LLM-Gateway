@@ -8,7 +8,7 @@ class ApiService {
   constructor() {
     this.api = axios.create({
       baseURL: '/api',
-      timeout: 10000,
+      timeout: 60000, // 增加到60秒，适应LLM API响应时间
       headers: {
         'Content-Type': 'application/json',
       }
@@ -79,6 +79,73 @@ class ApiService {
   async chatCompletion(request: ChatCompletion): Promise<any> {
     const response = await this.api.post('/chat/completions', request)
     return response.data
+  }
+
+  // 流式聊天完成接口
+  async chatCompletionStream(data: ChatCompletion, onChunk: (chunk: string) => void, onDone: () => void): Promise<void> {
+    try {
+      const response = await fetch('/api/chat/stream', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(data)
+      })
+
+      if (!response.ok) {
+        throw new Error(`Stream request failed: ${response.status}`)
+      }
+
+      const reader = response.body?.getReader()
+      if (!reader) {
+        throw new Error('No readable stream available')
+      }
+
+      const decoder = new TextDecoder()
+      let buffer = ''
+
+      while (true) {
+        const { done, value } = await reader.read()
+        
+        if (done) {
+          onDone()
+          break
+        }
+
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() || ''
+
+        for (const line of lines) {
+          if (line.trim() === '') continue
+          
+          if (line.startsWith('data: ')) {
+            const data = line.slice(6)
+            
+            if (data === '[DONE]') {
+              onDone()
+              return
+            }
+
+            try {
+              const parsed = JSON.parse(data)
+              if (parsed.choices?.[0]?.delta?.content) {
+                onChunk(parsed.choices[0].delta.content)
+              }
+              if (parsed.done) {
+                onDone()
+                return
+              }
+            } catch (e) {
+              console.warn('Failed to parse SSE data:', data)
+            }
+          }
+        }
+      }
+    } catch (error) {
+      console.error('Stream error:', error)
+      throw error
+    }
   }
 
   // 获取系统配置

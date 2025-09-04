@@ -11,16 +11,23 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/llm-gateway/gateway/internal/config"
+	"github.com/llm-gateway/gateway/pkg/cost"
+	"github.com/llm-gateway/gateway/pkg/retry"
 	"github.com/llm-gateway/gateway/pkg/types"
 	"github.com/llm-gateway/gateway/pkg/utils"
 )
 
 // OpenAIProvider implements the Provider interface for OpenAI
 type OpenAIProvider struct {
-	config     *types.ProviderConfig
-	logger     *utils.Logger
-	httpClient *http.Client
-	rateLimits *types.RateLimitInfo
+	config         *types.ProductionConfig
+	secureConfig   *types.SecureConfig
+	logger         *utils.Logger
+	httpClient     *http.Client
+	rateLimits     *types.RateLimitInfo
+	retryManager   retry.RetryManagerInterface
+	costCalculator *cost.CostCalculator
+	configManager  config.ConfigurationManager
 }
 
 // OpenAI API structures
@@ -127,27 +134,106 @@ var openAIPricing = map[string]struct {
 	"text-embedding-3-large": {0.00013, 0.00013},
 }
 
-// NewOpenAIProvider creates a new OpenAI provider
-func NewOpenAIProvider(config *types.ProviderConfig, logger *utils.Logger) *OpenAIProvider {
-	if config.BaseURL == "" {
-		config.BaseURL = "https://api.openai.com/v1"
+// NewOpenAIProvider creates a new OpenAI provider with production features
+func NewOpenAIProvider(baseConfig *types.ProviderConfig, logger *utils.Logger) *OpenAIProvider {
+	// Convert to production config
+	prodConfig := types.NewProductionConfig(baseConfig)
+
+	// Set defaults
+	if prodConfig.BaseURL == "" {
+		prodConfig.BaseURL = "https://api.openai.com/v1"
+	}
+	if prodConfig.Timeout == 0 {
+		prodConfig.Timeout = 60 * time.Second
+	}
+	if prodConfig.APIKeyEnvVar == "" {
+		prodConfig.APIKeyEnvVar = "OPENAI_API_KEY"
 	}
 
-	if config.Timeout == 0 {
-		config.Timeout = 60 * time.Second
+	// Create configuration manager
+	configManager := config.NewSecureConfigManager("configs/production.yaml", logger)
+
+	// Load secure configuration
+	secureConfig, err := configManager.GetSecureConfig("openai")
+	if err != nil {
+		logger.WithError(err).Warn("Failed to load secure config, will attempt to load on first use")
+		secureConfig = &types.SecureConfig{
+			BaseURL: prodConfig.BaseURL,
+		}
 	}
+
+	// Create retry manager
+	retryManager := retry.NewRetryManager(prodConfig.RetryPolicy, logger)
+
+	// Create cost calculator
+	costCalculator := cost.NewCostCalculator(logger)
 
 	return &OpenAIProvider{
-		config: config,
-		logger: logger,
+		config:         prodConfig,
+		secureConfig:   secureConfig,
+		logger:         logger,
+		configManager:  configManager,
+		retryManager:   retryManager,
+		costCalculator: costCalculator,
 		httpClient: &http.Client{
-			Timeout: config.Timeout,
+			Timeout: prodConfig.Timeout,
 		},
 		rateLimits: &types.RateLimitInfo{
-			RequestsPerMinute: config.RateLimit,
+			RequestsPerMinute: prodConfig.RateLimit,
 			ResetTime:         time.Now().Add(time.Minute),
 		},
 	}
+}
+
+// NewProductionOpenAIProvider creates a new OpenAI provider specifically for production
+func NewProductionOpenAIProvider(configPath string, logger *utils.Logger) (*OpenAIProvider, error) {
+	// Create configuration manager
+	configManager := config.NewSecureConfigManager(configPath, logger)
+
+	// Load production configuration
+	prodConfig, err := configManager.LoadProviderConfig("openai")
+	if err != nil {
+		return nil, fmt.Errorf("failed to load OpenAI configuration: %w", err)
+	}
+
+	// Load secure credentials
+	secureConfig, err := configManager.GetSecureConfig("openai")
+	if err != nil {
+		return nil, fmt.Errorf("failed to load secure OpenAI credentials: %w", err)
+	}
+
+	// Validate configuration
+	if err := prodConfig.Validate(); err != nil {
+		return nil, fmt.Errorf("OpenAI configuration validation failed: %w", err)
+	}
+
+	// Validate credentials
+	if err := configManager.ValidateAPIKey(context.Background(), "openai", secureConfig.APIKey); err != nil {
+		return nil, fmt.Errorf("OpenAI API key validation failed: %w", err)
+	}
+
+	// Create components
+	retryManager := retry.NewRetryManager(prodConfig.RetryPolicy, logger)
+	costCalculator := cost.NewCostCalculator(logger)
+
+	provider := &OpenAIProvider{
+		config:         prodConfig,
+		secureConfig:   secureConfig,
+		logger:         logger,
+		configManager:  configManager,
+		retryManager:   retryManager,
+		costCalculator: costCalculator,
+		httpClient: &http.Client{
+			Timeout: prodConfig.Timeout,
+		},
+		rateLimits: &types.RateLimitInfo{
+			RequestsPerMinute: prodConfig.RateLimit,
+			ResetTime:         time.Now().Add(time.Minute),
+		},
+	}
+
+	logger.WithField("provider", "openai").Info("Production OpenAI provider initialized successfully")
+	return provider, nil
 }
 
 // GetName returns the provider name
@@ -167,7 +253,7 @@ func (p *OpenAIProvider) Call(ctx context.Context, req *types.ChatCompletionRequ
 
 // GetConfig returns the provider configuration
 func (p *OpenAIProvider) GetConfig() *types.ProviderConfig {
-	return p.config
+	return p.config.ProviderConfig
 }
 
 // ValidateConfig validates the provider configuration
@@ -183,37 +269,113 @@ func (p *OpenAIProvider) ValidateConfig(config *types.ProviderConfig) error {
 	return nil
 }
 
-// ChatCompletion sends a chat completion request to OpenAI
+// ChatCompletion sends a chat completion request to OpenAI with production features
 func (p *OpenAIProvider) ChatCompletion(ctx context.Context, req *types.ChatCompletionRequest) (*types.ChatCompletionResponse, error) {
+	// Ensure we have valid API credentials
+	if err := p.ensureValidCredentials(ctx); err != nil {
+		return nil, fmt.Errorf("credential validation failed: %w", err)
+	}
+
+	// Estimate cost before making the request
+	costEstimate, err := p.costCalculator.EstimateRequestCost(req)
+	if err != nil {
+		p.logger.WithError(err).Warn("Failed to estimate request cost")
+	} else {
+		// Validate cost limits (implement basic validation here)
+		if p.config.CostLimits != nil && p.config.CostLimits.PerRequestLimit > 0 && costEstimate.EstimatedCost > p.config.CostLimits.PerRequestLimit {
+			return nil, fmt.Errorf("estimated cost $%.4f exceeds per-request limit $%.2f",
+				costEstimate.EstimatedCost, p.config.CostLimits.PerRequestLimit)
+		}
+
+		p.logger.WithFields(map[string]interface{}{
+			"estimated_cost": costEstimate.EstimatedCost,
+			"input_tokens":   costEstimate.InputTokens,
+			"output_tokens":  costEstimate.OutputTokens,
+		}).Info("OpenAI request cost estimated")
+	}
+
+	// Execute request with retry logic
+	var response *types.ChatCompletionResponse
+	err = p.retryManager.ExecuteWithRetry(ctx, func(ctx context.Context, attempt int) error {
+		var attemptErr error
+		response, attemptErr = p.executeAPIRequest(ctx, req, attempt)
+		return attemptErr
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	// Calculate actual cost if cost tracking is enabled
+	if p.config.CostTracking && response != nil {
+		actualCost, err := p.costCalculator.CalculateActualCost(req, response)
+		if err != nil {
+			p.logger.WithError(err).Warn("Failed to calculate actual cost")
+		} else {
+			p.logger.WithFields(map[string]interface{}{
+				"actual_cost":   actualCost.TotalCost,
+				"input_tokens":  actualCost.InputTokens,
+				"output_tokens": actualCost.OutputTokens,
+				"input_cost":    actualCost.InputCost,
+				"output_cost":   actualCost.OutputCost,
+			}).Info("OpenAI request cost calculated")
+		}
+	}
+
+	return response, nil
+}
+
+// executeAPIRequest executes a single API request attempt
+func (p *OpenAIProvider) executeAPIRequest(ctx context.Context, req *types.ChatCompletionRequest, attempt int) (*types.ChatCompletionResponse, error) {
 	// Convert request to OpenAI format
 	openAIReq := p.convertRequest(req)
 
 	// Serialize request
 	reqBody, err := json.Marshal(openAIReq)
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal request: %w", err)
+		return nil, retry.NewProviderRetryError(p.GetName(), "ChatCompletion", types.ErrorClient,
+			fmt.Sprintf("failed to marshal request: %v", err), false)
 	}
 
 	// Create HTTP request
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", p.config.BaseURL+"/chat/completions", bytes.NewBuffer(reqBody))
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", p.secureConfig.BaseURL+"/chat/completions", bytes.NewBuffer(reqBody))
 	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
+		return nil, retry.NewProviderRetryError(p.GetName(), "ChatCompletion", types.ErrorClient,
+			fmt.Sprintf("failed to create request: %v", err), false)
 	}
 
-	// Set headers
+	// Set headers with real API key
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+p.config.APIKey)
+	httpReq.Header.Set("Authorization", "Bearer "+p.secureConfig.APIKey)
 	httpReq.Header.Set("User-Agent", "LLM-Gateway/2.0")
 
+	// Add organization header if available
+	if p.secureConfig.OrganizationID != "" {
+		httpReq.Header.Set("OpenAI-Organization", p.secureConfig.OrganizationID)
+	}
+
+	// Add project header if available
+	if p.secureConfig.ProjectID != "" {
+		httpReq.Header.Set("OpenAI-Project", p.secureConfig.ProjectID)
+	}
+
+	// Log request attempt
+	p.logger.WithFields(map[string]interface{}{
+		"model":   req.Model,
+		"attempt": attempt,
+		"url":     httpReq.URL.String(),
+	}).Info("Sending OpenAI API request")
+
 	// Send request
+	start := time.Now()
 	resp, err := p.httpClient.Do(httpReq)
+	duration := time.Since(start)
+
 	if err != nil {
-		return nil, &ProviderError{
-			Provider:  p.GetName(),
-			Operation: "ChatCompletion",
-			Message:   fmt.Sprintf("HTTP request failed: %v", err),
-			Retryable: true,
-		}
+		// Classify network error
+		retryError := retry.ClassifyError(err, p.GetName(), "ChatCompletion")
+		p.logger.WithError(err).WithField("duration", duration).Error("OpenAI API request failed")
+		return nil, retryError
 	}
 	defer resp.Body.Close()
 
@@ -223,38 +385,100 @@ func (p *OpenAIProvider) ChatCompletion(ctx context.Context, req *types.ChatComp
 	// Read response body
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
+		return nil, retry.NewProviderRetryError(p.GetName(), "ChatCompletion", types.ErrorNetwork,
+			fmt.Sprintf("failed to read response: %v", err), true)
 	}
+
+	p.logger.WithFields(map[string]interface{}{
+		"status_code": resp.StatusCode,
+		"duration":    duration,
+		"attempt":     attempt,
+	}).Info("OpenAI API response received")
 
 	// Handle errors
 	if resp.StatusCode != http.StatusOK {
+		errorMsg := string(respBody)
+
+		// Try to parse OpenAI error format
 		var errorResp openAIErrorResponse
-		if err := json.Unmarshal(respBody, &errorResp); err == nil {
-			return nil, &ProviderError{
-				Provider:   p.GetName(),
-				Operation:  "ChatCompletion",
-				StatusCode: resp.StatusCode,
-				Message:    errorResp.Error.Message,
-				Retryable:  resp.StatusCode >= 500,
+		if err := json.Unmarshal(respBody, &errorResp); err == nil && errorResp.Error.Message != "" {
+			errorMsg = errorResp.Error.Message
+		}
+
+		// Create detailed retry error
+		retryError := retry.ClassifyError(fmt.Errorf("API error: %s", errorMsg), p.GetName(), "ChatCompletion")
+		retryError.StatusCode = resp.StatusCode
+
+		// Special handling for specific OpenAI error types
+		switch resp.StatusCode {
+		case http.StatusUnauthorized:
+			retryError.Category = types.ErrorAuth
+			retryError.Retryable = false
+		case http.StatusTooManyRequests:
+			retryError.Category = types.ErrorRateLimit
+			retryError.Retryable = true
+			// Try to extract retry-after header
+			if retryAfter := resp.Header.Get("Retry-After"); retryAfter != "" {
+				if seconds, err := strconv.Atoi(retryAfter); err == nil {
+					retryError.RetryAfter = seconds
+				}
 			}
+		case http.StatusPaymentRequired:
+			retryError.Category = types.ErrorQuota
+			retryError.Retryable = false
 		}
-		return nil, &ProviderError{
-			Provider:   p.GetName(),
-			Operation:  "ChatCompletion",
-			StatusCode: resp.StatusCode,
-			Message:    string(respBody),
-			Retryable:  resp.StatusCode >= 500,
-		}
+
+		p.logger.WithFields(map[string]interface{}{
+			"status_code": resp.StatusCode,
+			"error":       errorMsg,
+			"retryable":   retryError.Retryable,
+		}).Error("OpenAI API returned error")
+
+		return nil, retryError
 	}
 
-	// Parse response
+	// Parse successful response
 	var openAIResp openAIResponse
 	if err := json.Unmarshal(respBody, &openAIResp); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
+		return nil, retry.NewProviderRetryError(p.GetName(), "ChatCompletion", types.ErrorServer,
+			fmt.Sprintf("failed to unmarshal response: %v", err), true)
+	}
+
+	// Log successful response
+	if len(openAIResp.Choices) > 0 {
+		p.logger.WithFields(map[string]interface{}{
+			"response_length": len(openAIResp.Choices[0].Message.Content),
+			"finish_reason":   openAIResp.Choices[0].FinishReason,
+			"tokens_used":     openAIResp.Usage.TotalTokens,
+		}).Info("OpenAI API request completed successfully")
 	}
 
 	// Convert response to standard format
 	return p.convertResponse(&openAIResp), nil
+}
+
+// ensureValidCredentials ensures we have valid API credentials
+func (p *OpenAIProvider) ensureValidCredentials(ctx context.Context) error {
+	if p.secureConfig.APIKey == "" {
+		// Try to reload credentials
+		if err := p.configManager.RefreshCredentials("openai"); err != nil {
+			return fmt.Errorf("no API key available and failed to refresh: %w", err)
+		}
+
+		// Get refreshed config
+		refreshedConfig, err := p.configManager.GetSecureConfig("openai")
+		if err != nil {
+			return fmt.Errorf("failed to get refreshed config: %w", err)
+		}
+		p.secureConfig = refreshedConfig
+	}
+
+	// Validate API key format
+	if err := p.configManager.ValidateAPIKey(ctx, "openai", p.secureConfig.APIKey); err != nil {
+		return fmt.Errorf("API key validation failed: %w", err)
+	}
+
+	return nil
 }
 
 // HealthCheck performs a health check
@@ -452,3 +676,80 @@ func (p *OpenAIProvider) updateRateLimits(headers http.Header) {
 	}
 }
 
+// ============================================================================
+// Production Features (Week 5)
+// ============================================================================
+
+// ProviderMetrics represents metrics for the provider
+type ProviderMetrics struct {
+	TotalRequests      int64   `json:"total_requests"`
+	SuccessfulRequests int64   `json:"successful_requests"`
+	FailedRequests     int64   `json:"failed_requests"`
+	RetryCount         int64   `json:"retry_count"`
+	AverageAttempts    float64 `json:"average_attempts"`
+	LastError          string  `json:"last_error"`
+}
+
+// ModelSpec represents specifications for a model
+type ModelSpec struct {
+	Name            string  `json:"name"`
+	ContextLength   int     `json:"context_length"`
+	CostPer1KTokens float64 `json:"cost_per_1k_tokens"`
+}
+
+// EstimateTokens estimates token count for a request (production feature)
+func (p *OpenAIProvider) EstimateTokens(req *types.ChatCompletionRequest) (*types.TokenEstimate, error) {
+	estimate, err := p.costCalculator.EstimateRequestCost(req)
+	if err != nil {
+		return nil, err
+	}
+	// Return the embedded TokenEstimate from CostEstimate
+	return estimate.TokenEstimate, nil
+}
+
+// CalculateActualCost calculates the actual cost of a completed request (production feature)
+func (p *OpenAIProvider) CalculateActualCost(req *types.ChatCompletionRequest, resp *types.ChatCompletionResponse) (*types.CostBreakdown, error) {
+	return p.costCalculator.CalculateActualCost(req, resp)
+}
+
+// GetProviderMetrics returns provider-specific metrics (production feature)
+func (p *OpenAIProvider) GetProviderMetrics() *ProviderMetrics {
+	stats := p.retryManager.GetRetryStats()
+
+	return &ProviderMetrics{
+		TotalRequests:      stats.TotalAttempts,
+		SuccessfulRequests: stats.TotalAttempts - stats.FailedRetries,
+		FailedRequests:     stats.FailedRetries,
+		RetryCount:         stats.TotalRetries,
+		AverageAttempts:    stats.AverageAttempts,
+		LastError:          "", // Could be tracked separately if needed
+	}
+}
+
+// GetLastError returns the last error encountered (production feature)
+func (p *OpenAIProvider) GetLastError() *ProviderError {
+	// This would require tracking the last error state
+	// For now, return nil - could be implemented with a lastError field
+	return nil
+}
+
+// ValidateCredentials validates the API credentials (production feature)
+func (p *OpenAIProvider) ValidateCredentials(ctx context.Context) error {
+	return p.ensureValidCredentials(ctx)
+}
+
+// GetSupportedModels returns the models supported by this provider (production feature)
+func (p *OpenAIProvider) GetSupportedModels() ([]*ModelSpec, error) {
+	return []*ModelSpec{
+		{Name: "gpt-3.5-turbo", ContextLength: 4096, CostPer1KTokens: 0.002},
+		{Name: "gpt-4", ContextLength: 8192, CostPer1KTokens: 0.06},
+		{Name: "gpt-4-turbo", ContextLength: 128000, CostPer1KTokens: 0.03},
+		{Name: "gpt-4o", ContextLength: 128000, CostPer1KTokens: 0.015},
+		{Name: "gpt-4o-mini", ContextLength: 128000, CostPer1KTokens: 0.0006},
+	}, nil
+}
+
+// GetPricingInfo returns pricing information for a model (production feature)
+func (p *OpenAIProvider) GetPricingInfo(model string) (*types.ModelPricing, error) {
+	return p.costCalculator.GetPricingInfo("openai", model)
+}

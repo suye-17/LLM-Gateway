@@ -3,6 +3,7 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/sirupsen/logrus"
 
+	"github.com/llm-gateway/gateway/internal/providers"
 	"github.com/llm-gateway/gateway/internal/router"
 	"github.com/llm-gateway/gateway/pkg/types"
 	"github.com/llm-gateway/gateway/pkg/utils"
@@ -18,12 +20,13 @@ import (
 
 // Gateway represents the core gateway service
 type Gateway struct {
-	config      *types.Config
-	router      *gin.Engine
-	server      *http.Server
-	logger      *logrus.Logger
-	middleware  []types.Middleware
-	smartRouter *router.SmartRouter  // Week4: 智能路由器
+	config        *types.Config
+	router        *gin.Engine
+	server        *http.Server
+	logger        *logrus.Logger
+	middleware    []types.Middleware
+	smartRouter   *router.SmartRouter      // Week4: 智能路由器
+	zhipuProvider *providers.ZhipuProvider // Week5: 智谱AI提供商
 }
 
 // New creates a new Gateway instance
@@ -72,18 +75,29 @@ func New(cfg *types.Config) *Gateway {
 		smartRouterConfig.CircuitBreaker.MaxRequests = cfg.SmartRouter.CircuitBreaker.MaxRequests
 		smartRouterConfig.MetricsEnabled = cfg.SmartRouter.MetricsEnabled
 	}
-	
+
 	smartRouter, err := router.NewSmartRouter(smartRouterConfig, utilsLogger)
 	if err != nil {
 		logger.WithError(err).Warn("Failed to initialize Smart Router, using mock router")
 	}
 
+	// Initialize Week5 智谱AI provider
+	zhipuConfig := &types.ProviderConfig{
+		Name:    "zhipu-provider",
+		Type:    "zhipu",
+		Enabled: true,
+		BaseURL: "https://open.bigmodel.cn/api/paas/v4",
+		Timeout: 30 * time.Second,
+	}
+	zhipuProvider := providers.NewZhipuProvider(zhipuConfig, utilsLogger)
+
 	gateway := &Gateway{
-		config:      cfg,
-		router:      ginRouter,
-		logger:      logger,
-		middleware:  make([]types.Middleware, 0),
-		smartRouter: smartRouter,
+		config:        cfg,
+		router:        ginRouter,
+		logger:        logger,
+		middleware:    make([]types.Middleware, 0),
+		smartRouter:   smartRouter,
+		zhipuProvider: zhipuProvider,
 	}
 
 	// Setup routes
@@ -102,6 +116,9 @@ func (g *Gateway) setupRoutes() {
 	{
 		// Chat completions endpoint (OpenAI compatible)
 		v1.POST("/chat/completions", g.chatCompletions)
+
+		// Stream chat completions endpoint (SSE)
+		v1.POST("/chat/stream", g.chatStream)
 
 		// Gateway management endpoints
 		admin := v1.Group("/admin")
@@ -154,18 +171,18 @@ func (g *Gateway) Stop(ctx context.Context) error {
 func (g *Gateway) startMetricsServer() {
 	metricsRouter := gin.New()
 	metricsRouter.Use(gin.Recovery())
-	
+
 	// Add metrics endpoint
 	metricsRouter.GET("/metrics", g.getPrometheusMetrics)
-	
+
 	metricsAddr := fmt.Sprintf("%s:%d", g.config.Server.Host, g.config.Metrics.Port)
 	metricsServer := &http.Server{
 		Addr:    metricsAddr,
 		Handler: metricsRouter,
 	}
-	
+
 	g.logger.WithField("address", metricsAddr).Info("Starting metrics server")
-	
+
 	if err := metricsServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		g.logger.WithError(err).Error("Metrics server failed")
 	}
@@ -232,25 +249,52 @@ func (g *Gateway) chatCompletions(c *gin.Context) {
 		"user_id":    req.UserID,
 	}).Info("Processing chat completion request")
 
-	// Use Week4 Smart Router for intelligent request routing
+	// Week 5: Use real provider adapters based on model selection
+	provider, err := g.selectProviderByModel(req.Model)
+	if err != nil {
+		g.logger.WithError(err).Error("Failed to select provider for model")
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": gin.H{
+				"message": fmt.Sprintf("Unsupported model: %s", req.Model),
+				"type":    "invalid_request_error",
+			},
+		})
+		return
+	}
+
+	g.logger.WithFields(logrus.Fields{
+		"model":    req.Model,
+		"provider": provider,
+	}).Info("Selected provider for model")
+
+	// Call real API using Week 5 adapters
 	var response *types.Response
-	if g.smartRouter != nil {
-		g.logger.Info("Using Week4 Smart Router for request routing")
-		
-		// Generate intelligent response based on user input
+	if provider == "zhipu" {
+		response, err = g.callZhipuAPI(&req)
+		if err != nil {
+			g.logger.WithError(err).Error("API call failed")
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": gin.H{
+					"message": "API call failed",
+					"type":    "api_error",
+				},
+			})
+			return
+		}
+	} else {
+		// Demo response for other providers (Week4 compatibility)
 		aiResponse := g.generateAIResponse(&req)
-		
 		response = &types.Response{
 			ID:       req.ID,
 			Model:    req.Model,
-			Provider: "smart-router-demo",
+			Provider: fmt.Sprintf("%s-demo", provider),
 			Created:  time.Now(),
 			Choices: []types.Choice{
 				{
 					Index: 0,
 					Message: types.Message{
 						Role:    "assistant",
-						Content: aiResponse,
+						Content: fmt.Sprintf("【%s模型演示】%s", req.Model, aiResponse),
 					},
 					FinishReason: func() *string { s := "stop"; return &s }(),
 				},
@@ -261,30 +305,6 @@ func (g *Gateway) chatCompletions(c *gin.Context) {
 				TotalTokens:      80,
 			},
 			LatencyMs: 50,
-		}
-	} else {
-		// Fallback response
-		response = &types.Response{
-			ID:       req.ID,
-			Model:    req.Model,
-			Provider: "fallback-mock",
-			Created:  time.Now(),
-			Choices: []types.Choice{
-				{
-					Index: 0,
-					Message: types.Message{
-						Role:    "assistant",
-						Content: "Smart Router not available, using fallback response.",
-					},
-					FinishReason: func() *string { s := "stop"; return &s }(),
-				},
-			},
-			Usage: types.Usage{
-				PromptTokens:     50,
-				CompletionTokens: 20,
-				TotalTokens:      70,
-			},
-			LatencyMs: 100,
 		}
 	}
 
@@ -310,16 +330,16 @@ func (g *Gateway) listProviders(c *gin.Context) {
 	})
 }
 
-// Get metrics handler  
+// Get metrics handler
 func (g *Gateway) getMetrics(c *gin.Context) {
 	// Week4 Smart Router metrics
 	c.JSON(http.StatusOK, gin.H{
 		"status":    "Week4 Smart Router Active",
 		"timestamp": time.Now().UTC(),
 		"smart_router": gin.H{
-			"strategy":      "round_robin",
-			"requests":      1,
-			"providers":     []string{"openai", "anthropic", "baidu"},
+			"strategy":  "round_robin",
+			"requests":  1,
+			"providers": []string{"openai", "anthropic", "baidu"},
 			"health_checks": gin.H{
 				"interval": "30s",
 				"enabled":  true,
@@ -376,12 +396,12 @@ func (g *Gateway) generateAIResponse(req *types.Request) string {
 	if len(req.Messages) > 0 {
 		userMessage = req.Messages[len(req.Messages)-1].Content
 	}
-	
+
 	// Simple keyword-based response generation
 	userMessageLower := strings.ToLower(userMessage)
-	
+
 	var baseResponse string
-	
+
 	// Greeting responses
 	if strings.Contains(userMessageLower, "你好") || strings.Contains(userMessageLower, "hello") || strings.Contains(userMessageLower, "hi") {
 		baseResponse = "你好！我是通过LLM Gateway智能路由系统为您服务的AI助手。很高兴与您交流！"
@@ -401,10 +421,299 @@ func (g *Gateway) generateAIResponse(req *types.Request) string {
 		// Default response for other inputs
 		baseResponse = fmt.Sprintf("我理解您说的\"%s\"。作为通过智能路由系统的AI助手，我正在努力为您提供最佳的服务体验。", userMessage)
 	}
-	
+
 	// Add smart router status information
 	routerStatus := "\n\n🔄 路由信息：此回复由Week4智能路由系统处理，使用round-robin负载均衡，已通过健康检查和熔断保护。"
-	
+
 	return baseResponse + routerStatus
 }
 
+// selectProviderByModel selects the appropriate provider based on the model name
+func (g *Gateway) selectProviderByModel(model string) (string, error) {
+	// Model to provider mapping
+	modelProviderMap := map[string]string{
+		// 智谱AI models
+		"glm-4.5":     "zhipu",
+		"glm-4.5v":    "zhipu",
+		"glm-4.5-air": "zhipu",
+		"glm-4-flash": "zhipu", // backward compatibility
+		"glm-4":       "zhipu",
+		"glm-4-air":   "zhipu",
+
+		// OpenAI models (fallback to demo for now)
+		"gpt-4":         "demo",
+		"gpt-3.5-turbo": "demo",
+
+		// Anthropic models (fallback to demo for now)
+		"claude-3":        "demo",
+		"claude-3-sonnet": "demo",
+
+		// Baidu models (fallback to demo for now)
+		"ernie-bot":   "demo",
+		"ernie-bot-4": "demo",
+	}
+
+	provider, exists := modelProviderMap[model]
+	if !exists {
+		return "", fmt.Errorf("unsupported model: %s", model)
+	}
+
+	return provider, nil
+}
+
+// callZhipuAPI calls the real ZhipuAI API using Week 5 adapter
+func (g *Gateway) callZhipuAPI(req *types.Request) (*types.Response, error) {
+	g.logger.Info("Calling real ZhipuAI API using Week 5 adapter")
+
+	// Convert gateway request to ChatCompletionRequest
+	chatReq := &types.ChatCompletionRequest{
+		Model:    req.Model,
+		Messages: req.Messages,
+	}
+
+	// Call the real API
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	chatResp, err := g.zhipuProvider.ChatCompletion(ctx, chatReq)
+	duration := time.Since(start)
+
+	if err != nil {
+		g.logger.WithError(err).Error("ZhipuAI API call failed")
+		return nil, fmt.Errorf("ZhipuAI API call failed: %w", err)
+	}
+
+	g.logger.WithFields(logrus.Fields{
+		"model":    req.Model,
+		"tokens":   chatResp.Usage.TotalTokens,
+		"duration": duration,
+		"provider": "zhipu",
+	}).Info("ZhipuAI API call successful")
+
+	// Convert back to gateway response format
+	response := &types.Response{
+		ID:       req.ID,
+		Model:    chatResp.Model,
+		Provider: "zhipu-real",
+		Created:  time.Now(),
+		Choices:  make([]types.Choice, len(chatResp.Choices)),
+		Usage: types.Usage{
+			PromptTokens:     chatResp.Usage.PromptTokens,
+			CompletionTokens: chatResp.Usage.CompletionTokens,
+			TotalTokens:      chatResp.Usage.TotalTokens,
+		},
+		LatencyMs: duration.Milliseconds(),
+	}
+
+	// Convert choices
+	for i, choice := range chatResp.Choices {
+		response.Choices[i] = types.Choice{
+			Index:        choice.Index,
+			Message:      choice.Message,
+			FinishReason: choice.FinishReason,
+		}
+	}
+
+	return response, nil
+}
+
+// chatStream handles streaming chat completions using Server-Sent Events
+func (g *Gateway) chatStream(c *gin.Context) {
+	var req types.Request
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		g.logger.WithError(err).Error("Failed to bind stream request")
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": gin.H{
+				"message": "Invalid request format",
+				"type":    "invalid_request_error",
+			},
+		})
+		return
+	}
+
+	// Set request ID and timestamp
+	req.ID = generateRequestID()
+	req.Timestamp = time.Now()
+
+	g.logger.WithFields(logrus.Fields{
+		"request_id": req.ID,
+		"model":      req.Model,
+		"stream":     true,
+	}).Info("Processing streaming chat completion request")
+
+	// Select provider
+	provider, err := g.selectProviderByModel(req.Model)
+	if err != nil {
+		g.logger.WithError(err).Error("Failed to select provider for stream")
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": gin.H{
+				"message": fmt.Sprintf("Unsupported model: %s", req.Model),
+				"type":    "invalid_request_error",
+			},
+		})
+		return
+	}
+
+	// Set SSE headers
+	c.Header("Content-Type", "text/event-stream")
+	c.Header("Cache-Control", "no-cache")
+	c.Header("Connection", "keep-alive")
+	c.Header("Access-Control-Allow-Origin", "*")
+	c.Header("Access-Control-Allow-Headers", "Cache-Control")
+
+	// Use real streaming API for zhipu
+	if provider == "zhipu" {
+		g.streamZhipuAPI(c, &req)
+	} else {
+		g.streamMockResponse(c, &req)
+	}
+}
+
+// streamZhipuAPI handles streaming response from ZhipuAI
+func (g *Gateway) streamZhipuAPI(c *gin.Context, req *types.Request) {
+	g.logger.Info("Starting streaming call to ZhipuAI API")
+
+	// 设置流式响应头
+	c.Header("Content-Type", "text/event-stream; charset=utf-8")
+	c.Header("Cache-Control", "no-cache")
+	c.Header("Connection", "keep-alive")
+	c.Header("Access-Control-Allow-Origin", "*")
+	c.Header("Access-Control-Allow-Headers", "Cache-Control")
+
+	// 确保ResponseWriter支持Flusher
+	flusher, ok := c.Writer.(http.Flusher)
+	if !ok {
+		c.String(http.StatusInternalServerError, "Streaming unsupported")
+		return
+	}
+
+	// Convert to ChatCompletionRequest with streaming enabled
+	streamEnabled := true
+	chatReq := &types.ChatCompletionRequest{
+		Model:    req.Model,
+		Messages: req.Messages,
+		Stream:   &streamEnabled, // Enable streaming
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 60*time.Second)
+	defer cancel()
+
+	// Call streaming API
+	err := g.zhipuProvider.ChatCompletionStream(ctx, chatReq, func(chunk string, done bool) {
+		if done {
+			// Send completion signal
+			completionData := map[string]interface{}{
+				"id": req.ID,
+				"choices": []map[string]interface{}{
+					{
+						"delta":         map[string]string{},
+						"finish_reason": "stop",
+					},
+				},
+				"done": true,
+			}
+
+			// 发送SSE格式数据
+			jsonData, _ := json.Marshal(completionData)
+			fmt.Fprintf(c.Writer, "event: message\n")
+			fmt.Fprintf(c.Writer, "data: %s\n\n", string(jsonData))
+			flusher.Flush()
+
+			// 发送结束信号
+			fmt.Fprintf(c.Writer, "data: [DONE]\n\n")
+			flusher.Flush()
+		} else if chunk != "" {
+			// Send content chunk
+			chunkData := map[string]interface{}{
+				"id":    req.ID,
+				"model": req.Model,
+				"choices": []map[string]interface{}{
+					{
+						"delta": map[string]string{
+							"content": chunk,
+						},
+						"finish_reason": nil,
+					},
+				},
+				"done": false,
+			}
+
+			// 发送SSE格式数据
+			jsonData, _ := json.Marshal(chunkData)
+			fmt.Fprintf(c.Writer, "event: message\n")
+			fmt.Fprintf(c.Writer, "data: %s\n\n", string(jsonData))
+			flusher.Flush()
+
+			g.logger.WithField("content", chunk).Debug("Sent chunk to client")
+		}
+	})
+
+	if err != nil {
+		g.logger.WithError(err).Error("Streaming API call failed")
+
+		// 发送错误信息
+		errorData := map[string]string{
+			"message": "Streaming failed",
+			"type":    "api_error",
+		}
+		jsonData, _ := json.Marshal(errorData)
+		fmt.Fprintf(c.Writer, "event: error\n")
+		fmt.Fprintf(c.Writer, "data: %s\n\n", string(jsonData))
+		flusher.Flush()
+	}
+}
+
+// streamMockResponse provides mock streaming for other providers
+func (g *Gateway) streamMockResponse(c *gin.Context, req *types.Request) {
+	g.logger.Info("Using mock streaming response")
+
+	// Generate response text
+	aiResponse := g.generateAIResponse(req)
+	words := strings.Fields(aiResponse)
+
+	// Stream word by word
+	for i, word := range words {
+		select {
+		case <-c.Request.Context().Done():
+			return
+		default:
+			content := word
+			if i < len(words)-1 {
+				content += " "
+			}
+
+			c.SSEvent("message", map[string]interface{}{
+				"id":    req.ID,
+				"model": req.Model,
+				"choices": []map[string]interface{}{
+					{
+						"delta": map[string]string{
+							"content": content,
+						},
+						"finish_reason": nil,
+					},
+				},
+				"done": false,
+			})
+			c.Writer.Flush()
+
+			// Simulate typing delay
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+
+	// Send completion signal
+	c.SSEvent("message", map[string]interface{}{
+		"id": req.ID,
+		"choices": []map[string]interface{}{
+			{
+				"delta":         map[string]string{},
+				"finish_reason": "stop",
+			},
+		},
+		"done": true,
+	})
+	c.SSEvent("", "[DONE]")
+}

@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react'
 import {
   Card, Input, Button, Select, Space, Divider,
-  Typography, Tag, Spin, message, Row, Col, Slider
+  Typography, Tag, Spin, message, Row, Col, Slider, Switch
 } from 'antd'
 import { SendOutlined, ClearOutlined, RobotOutlined, UserOutlined } from '@ant-design/icons'
 import { ChatMessage, ChatCompletion } from '../types'
@@ -20,6 +20,8 @@ const Chat: React.FC = () => {
   const [isLoading, setIsLoading] = useState(false)
   const [temperature, setTemperature] = useState(0.7)
   const [maxTokens, setMaxTokens] = useState(1000)
+  const [streamMode, setStreamMode] = useState(true) // 默认开启流式输出
+  const [currentStreamMessage, setCurrentStreamMessage] = useState('')
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
   // 演示用的模型选项（对应智能路由系统支持的模型）
@@ -30,6 +32,9 @@ const Chat: React.FC = () => {
     { value: 'claude-3-sonnet', label: 'Claude-3 Sonnet (Anthropic)', provider: 'anthropic' },
     { value: 'ernie-bot', label: '文心一言 (Baidu)', provider: 'baidu' },
     { value: 'ernie-bot-4', label: '文心一言 4.0 (Baidu)', provider: 'baidu' },
+    { value: 'glm-4.5', label: 'GLM-4.5 (智谱AI)', provider: 'zhipu' },
+    { value: 'glm-4.5v', label: 'GLM-4.5V (智谱AI)', provider: 'zhipu' },
+    { value: 'glm-4.5-air', label: 'GLM-4.5-Air (智谱AI)', provider: 'zhipu' },
   ]
 
   useEffect(() => {
@@ -61,6 +66,7 @@ const Chat: React.FC = () => {
     setMessages(prev => [...prev, userMessage])
     setInputText('')
     setIsLoading(true)
+    setCurrentStreamMessage('')
 
     try {
       const chatRequest: ChatCompletion = {
@@ -74,20 +80,56 @@ const Chat: React.FC = () => {
         temperature
       }
 
-      const response = await apiService.chatCompletion(chatRequest)
-      
-      const assistantMessage: ChatMessage = {
-        role: 'assistant',
-        content: response.choices?.[0]?.message?.content || '抱歉，没有收到有效响应',
-        timestamp: new Date()
-      }
+      if (streamMode) {
+        // 流式输出模式
+        let fullContent = ''
+        
+        // 添加一个空的助手消息用于流式显示
+        setMessages(prev => [...prev, {
+          role: 'assistant',
+          content: '',
+          timestamp: new Date()
+        }])
 
-      setMessages(prev => [...prev, assistantMessage])
+        await apiService.chatCompletionStream(
+          chatRequest,
+          (chunk: string) => {
+            // 接收到新的文本块
+            fullContent += chunk
+            setMessages(prev => {
+              const newMessages = [...prev]
+              // 更新最后一条消息（助手消息）
+              const lastIndex = newMessages.length - 1
+              newMessages[lastIndex] = {
+                ...newMessages[lastIndex],
+                content: fullContent
+              }
+              return newMessages
+            })
+          },
+          () => {
+            // 流式输出完成
+            setIsLoading(false)
+          }
+        )
+      } else {
+        // 传统一次性输出模式
+        const response = await apiService.chatCompletion(chatRequest)
+        
+        const assistantMessage: ChatMessage = {
+          role: 'assistant',
+          content: response.choices?.[0]?.message?.content || '抱歉，没有收到有效响应',
+          timestamp: new Date()
+        }
+
+        setMessages(prev => [...prev, assistantMessage])
+      }
     } catch (error) {
       message.error('发送消息失败，请稍后重试')
       console.error('Chat error:', error)
     } finally {
       setIsLoading(false)
+      setCurrentStreamMessage('')
     }
   }
 
@@ -249,6 +291,23 @@ const Chat: React.FC = () => {
                     </Option>
                   ))}
                 </Select>
+              </div>
+
+              <Divider />
+
+              <div>
+                <Space style={{ width: '100%', justifyContent: 'space-between' }}>
+                  <Text strong>流式输出:</Text>
+                  <Switch 
+                    checked={streamMode}
+                    onChange={setStreamMode}
+                    checkedChildren="开启"
+                    unCheckedChildren="关闭"
+                  />
+                </Space>
+                <div style={{ marginTop: 4, fontSize: 12, color: '#999' }}>
+                  {streamMode ? '✨ AI将逐字显示回复' : '📝 AI完成思考后一次性显示'}
+                </div>
               </div>
 
               <Divider />
